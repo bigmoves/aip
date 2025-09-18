@@ -403,12 +403,19 @@ impl ClientRegistrationService {
                 let supported_scope_strings = supported_scopes.as_strings();
                 let server_supported_scopes = parse_scope(&supported_scope_strings.join(" "));
 
-                if !requested_scopes.is_subset(&server_supported_scopes) {
-                    return Err(ClientRegistrationError::InvalidClientMetadata(format!(
-                        "Requested scope '{}' contains unsupported scopes. Supported scopes: {}",
-                        scope,
-                        supported_scope_strings.join(" ")
-                    )));
+                // Check if all requested scopes are either directly supported or match repo:* wildcard
+                for requested in &requested_scopes {
+                    let is_supported = server_supported_scopes.contains(requested) ||
+                        // Support the special repo:* wildcard for any repo scope
+                        (supported_scope_strings.contains(&"repo:*".to_string()) && requested.starts_with("repo:"));
+
+                    if !is_supported {
+                        return Err(ClientRegistrationError::InvalidClientMetadata(format!(
+                            "Requested scope '{}' is not supported. Supported scopes: {}",
+                            requested,
+                            supported_scope_strings.join(" ")
+                        )));
+                    }
                 }
             }
         }
@@ -713,6 +720,120 @@ mod tests {
                 error_msg
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_repo_wildcard_scope_validation() {
+        let storage = Arc::new(MemoryOAuthStorage::new());
+        let service = ClientRegistrationService::new(
+            storage,
+            chrono::Duration::days(1),
+            chrono::Duration::days(14),
+            true,
+        );
+
+        // Test with supported scopes including repo:* wildcard
+        let supported_scopes = crate::config::OAuthSupportedScopes::try_from(
+            "atproto transition:generic repo:*".to_string(),
+        )
+        .unwrap();
+
+        // Test 1: Specific repo scope should succeed when repo:* is supported
+        let valid_request1 = ClientRegistrationRequest {
+            client_name: Some("Test Client".to_string()),
+            redirect_uris: Some(vec!["https://example.com/callback".to_string()]),
+            grant_types: None,
+            response_types: None,
+            scope: Some("atproto repo:com.example.test".to_string()),
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            metadata: serde_json::Value::Null,
+        };
+
+        let result = service
+            .register_client_with_supported_scopes(valid_request1, Some(&supported_scopes))
+            .await;
+        assert!(
+            result.is_ok(),
+            "repo:com.example.test should succeed when repo:* is supported"
+        );
+
+        // Test 2: Multiple repo scopes should succeed
+        let valid_request2 = ClientRegistrationRequest {
+            client_name: Some("Test Client".to_string()),
+            redirect_uris: Some(vec!["https://example.com/callback".to_string()]),
+            grant_types: None,
+            response_types: None,
+            scope: Some("atproto repo:com.example.test repo:app.bsky.feed.post".to_string()),
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            metadata: serde_json::Value::Null,
+        };
+
+        let result = service
+            .register_client_with_supported_scopes(valid_request2, Some(&supported_scopes))
+            .await;
+        assert!(
+            result.is_ok(),
+            "Multiple repo scopes should succeed when repo:* is supported"
+        );
+
+        // Test 3: Non-repo scope should still be validated normally
+        let invalid_request = ClientRegistrationRequest {
+            client_name: Some("Test Client".to_string()),
+            redirect_uris: Some(vec!["https://example.com/callback".to_string()]),
+            grant_types: None,
+            response_types: None,
+            scope: Some("atproto transition:email".to_string()), // 'transition:email' not in supported scopes
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            metadata: serde_json::Value::Null,
+        };
+
+        let result = service
+            .register_client_with_supported_scopes(invalid_request, Some(&supported_scopes))
+            .await;
+        assert!(
+            result.is_err(),
+            "Non-repo unsupported scope should fail even when repo:* is supported"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("transition:email") && error_msg.contains("not supported"),
+                "Error should mention unsupported scope. Got: {}",
+                error_msg
+            );
+        }
+
+        // Test 4: Without repo:* wildcard, specific repo scopes should fail
+        let limited_scopes = crate::config::OAuthSupportedScopes::try_from(
+            "atproto transition:generic repo:read repo:write".to_string(),
+        )
+        .unwrap();
+
+        let should_fail_request = ClientRegistrationRequest {
+            client_name: Some("Test Client".to_string()),
+            redirect_uris: Some(vec!["https://example.com/callback".to_string()]),
+            grant_types: None,
+            response_types: None,
+            scope: Some("atproto repo:com.example.test".to_string()),
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            metadata: serde_json::Value::Null,
+        };
+
+        let result = service
+            .register_client_with_supported_scopes(should_fail_request, Some(&limited_scopes))
+            .await;
+        assert!(
+            result.is_err(),
+            "repo:com.example.test should fail when only specific repo scopes are allowed"
+        );
     }
 
     #[tokio::test]
