@@ -23,9 +23,8 @@
             config = { allowUnfree = true; };
           };
 
-          # Configure crane with stable Rust toolchain
-          craneLib = (crane.mkLib pkgs).overrideToolchain
-            fenix.packages.${system}.stable.toolchain;
+          # Configure crane with stable Rust toolchain from nixpkgs (more reliable)
+          craneLib = crane.mkLib pkgs;
 
           # Project source for crane
           src = pkgs.lib.cleanSourceWith {
@@ -265,8 +264,7 @@
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
-          craneLib = (crane.mkLib pkgs).overrideToolchain
-            fenix.packages.${system}.stable.toolchain;
+          craneLib = crane.mkLib pkgs;
         in
         {
           default = craneLib.devShell {
