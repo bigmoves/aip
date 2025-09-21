@@ -34,16 +34,31 @@ pub async fn get_userinfo_handler(
         }
     };
 
-    // Retrieve the DID document from DocumentStorage
+    // Retrieve the DID document from DocumentStorage, or resolve if missing
     let document = match state.document_storage.get_document_by_did(&user_id).await {
         Ok(Some(value)) => value,
         _ => {
-            tracing::warn!("no document found for user id");
-            let error_response = json!({
-                "error": "internal_error",
-                "error_description": "Internal error generating response"
-            });
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)));
+            // Document not in cache, try to resolve it
+            tracing::debug!("Document not found in cache for DID {}, attempting resolution", user_id);
+            let resolved_document = state.identity_resolver
+                .resolve(&user_id)
+                .await
+                .map_err(|e| {
+                    tracing::warn!("Failed to resolve DID {}: {:?}", user_id, e);
+                    let error_response = json!({
+                        "error": "internal_error",
+                        "error_description": "Failed to resolve DID"
+                    });
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+                })?;
+
+            // Store the resolved document in the cache for future use
+            if let Err(e) = state.document_storage.store_document(resolved_document.clone()).await {
+                tracing::warn!("Failed to store resolved document for DID {}: {:?}", user_id, e);
+                // Continue anyway - we have the document, just couldn't cache it
+            }
+
+            resolved_document
         }
     };
 
